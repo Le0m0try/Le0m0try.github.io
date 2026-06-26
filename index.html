@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Cosmic Rose Tunnel</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #030308;
+      touch-action: none;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    canvas { display: block; width: 100%; height: 100%; }
+
+    .overlay {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 2rem;
+    }
+
+    .message {
+      font-family: Georgia, 'Times New Roman', serif;
+      font-style: italic;
+      text-align: center;
+      color: rgba(255, 255, 255, 0.75);
+      text-shadow: 0 0 30px rgba(195, 177, 225, 0.5);
+      letter-spacing: 0.03em;
+      line-height: 1.6;
+      max-width: 90vw;
+      opacity: 0;
+    }
+
+    #instruction {
+      font-size: clamp(0.95rem, 4vw, 1.15rem);
+      opacity: 1;
+    }
+
+    #poem {
+      position: fixed;
+      bottom: 2rem;
+      left: 0;
+      right: 0;
+      font-size: clamp(0.78rem, 3.2vw, 0.92rem);
+      color: rgba(255, 255, 255, 0.28);
+      text-shadow: 0 0 20px rgba(150, 222, 209, 0.2);
+    }
+  </style>
+</head>
+<body>
+  <div class="overlay">
+    <p id="instruction" class="message">Touch the screen to travel through the stars…</p>
+    <p id="poem" class="message">In a universe of stars, I found a garden for you.</p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      const COLORS = [0xffb7c5, 0xc3b1e1, 0x96ded1];
+      const TUNNEL_RADIUS = 2.8;
+      const RING_SPACING = 2.2;
+      const RINGS = 36;
+      const ROSES_PER_RING = 5;
+      const MAX_FLYING = 24;
+      const DPR_CAP = 2;
+
+      let renderer, scene, camera;
+      let stars, starPhases;
+      let tunnelRoses = [];
+      let flyingRoses = [];
+      let stardustTex;
+
+      let velocity = 0;
+      let targetVelocity = 0;
+      let parallaxX = 0;
+      let parallaxY = 0;
+      let touchActive = false;
+      let lastTouchX = 0;
+      let lastTouchY = 0;
+      let interactionTime = 0;
+      let poemShown = false;
+      let instructionHidden = false;
+      let spawnCooldown = 0;
+
+      const instructionEl = document.getElementById('instruction');
+      const poemEl = document.getElementById('poem');
+
+      /* ── textures ── */
+      function createStardustTexture() {
+        const size = 128;
+        const c = document.createElement('canvas');
+        c.width = size;
+        c.height = size;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, size, size);
+
+        for (let i = 0; i < 280; i++) {
+          const x = Math.random() * size;
+          const y = Math.random() * size;
+          const r = Math.random() * 1.4 + 0.2;
+          const a = Math.random() * 0.85 + 0.15;
+          ctx.fillStyle = `rgba(255,255,255,${a})`;
+          ctx.beginPath();
+          ctx.arc(x, y, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        for (let i = 0; i < 40; i++) {
+          const x = Math.random() * size;
+          const y = Math.random() * size;
+          ctx.fillStyle = `rgba(255,220,240,${Math.random() * 0.5})`;
+          ctx.fillRect(x, y, 1, 1);
+        }
+
+        const tex = new THREE.CanvasTexture(c);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        return tex;
+      }
+
+      /* ── rose geometry ── */
+      function createPetalMaterial(color) {
+        return new THREE.MeshBasicMaterial({
+          color,
+          map: stardustTex,
+          transparent: true,
+          opacity: 0.92,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+      }
+
+      function createPetalShape() {
+        const shape = new THREE.Shape();
+        shape.moveTo(0, 0);
+        shape.bezierCurveTo(0.15, 0.12, 0.35, 0.45, 0.08, 0.85);
+        shape.bezierCurveTo(0.02, 0.95, -0.02, 0.95, -0.08, 0.85);
+        shape.bezierCurveTo(-0.35, 0.45, -0.15, 0.12, 0, 0);
+        return new THREE.ShapeGeometry(shape);
+      }
+
+      function buildRose(color) {
+        const group = new THREE.Group();
+        const petalGeo = createPetalShape();
+        const layers = 3;
+        const petalsPerLayer = 5;
+
+        for (let layer = 0; layer < layers; layer++) {
+          for (let i = 0; i < petalsPerLayer; i++) {
+            const petal = new THREE.Mesh(petalGeo, createPetalMaterial(color));
+            const angle = (i / petalsPerLayer) * Math.PI * 2 + layer * 0.4;
+            const tilt = 0.25 + layer * 0.22;
+            const scale = 0.55 - layer * 0.12;
+
+            petal.rotation.order = 'YXZ';
+            petal.rotation.y = angle;
+            petal.rotation.x = -tilt;
+            petal.scale.set(scale, scale * 1.1, 1);
+            group.add(petal);
+          }
+        }
+
+        const aura = new THREE.Mesh(
+          new THREE.SphereGeometry(0.55, 10, 10),
+          new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity: 0.12,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        group.add(aura);
+
+        const core = new THREE.Mesh(
+          new THREE.SphereGeometry(0.08, 6, 6),
+          new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 })
+        );
+        group.add(core);
+
+        return group;
+      }
+
+      function pickColor() {
+        return COLORS[(Math.random() * COLORS.length) | 0];
+      }
+
+      /* ── scene setup ── */
+      function init() {
+        stardustTex = createStardustTexture();
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, DPR_CAP));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x030308);
+        document.body.insertBefore(renderer.domElement, document.body.firstChild);
+
+        scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x030308, 0.045);
+
+        camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 120);
+        camera.position.set(0, 0, 0);
+
+        createStarfield();
+        createTunnel();
+      }
+
+      function createStarfield() {
+        const count = 1800;
+        const positions = new Float32Array(count * 3);
+        starPhases = new Float32Array(count);
+
+        for (let i = 0; i < count; i++) {
+          positions[i * 3] = (Math.random() - 0.5) * 80;
+          positions[i * 3 + 1] = (Math.random() - 0.5) * 80;
+          positions[i * 3 + 2] = -Math.random() * 100 - 5;
+          starPhases[i] = Math.random() * Math.PI * 2;
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+        const mat = new THREE.PointsMaterial({
+          color: 0xffffff,
+          size: 0.12,
+          transparent: true,
+          opacity: 0.85,
+          sizeAttenuation: true,
+          depthWrite: false,
+        });
+
+        stars = new THREE.Points(geo, mat);
+        scene.add(stars);
+      }
+
+      function createTunnel() {
+        tunnelRoses = [];
+        let idx = 0;
+        for (let ring = 0; ring < RINGS; ring++) {
+          for (let i = 0; i < ROSES_PER_RING; i++) {
+            const color = COLORS[(idx + i) % COLORS.length];
+            const rose = buildRose(color);
+            const angle = (i / ROSES_PER_RING) * Math.PI * 2 + ring * 0.35;
+            const z = -ring * RING_SPACING - 3;
+            const wobble = Math.sin(ring * 0.7) * 0.4;
+
+            rose.userData = {
+              baseAngle: angle,
+              ring,
+              z,
+              radius: TUNNEL_RADIUS + wobble,
+              rotSpeed: (Math.random() - 0.5) * 0.8,
+              spinAxis: Math.random() * Math.PI * 2,
+            };
+
+            scene.add(rose);
+            tunnelRoses.push(rose);
+            idx++;
+          }
+        }
+      }
+
+      function resetTunnelRose(rose, farthestZ) {
+        const ud = rose.userData;
+        ud.z = farthestZ - RING_SPACING * (0.5 + Math.random());
+        ud.baseAngle += Math.random() * 0.8;
+        ud.rotSpeed = (Math.random() - 0.5) * 0.8;
+        if (Math.random() > 0.7) {
+          const newColor = pickColor();
+          rose.traverse(child => {
+            if (child.isMesh && child.material && child.material.color) {
+              child.material.color.setHex(newColor);
+            }
+          });
+        }
+      }
+
+      function updateTunnel(dt, speed) {
+        for (let i = 0; i < tunnelRoses.length; i++) {
+          tunnelRoses[i].userData.z += speed;
+        }
+
+        let minZ = tunnelRoses[0].userData.z;
+        for (let i = 1; i < tunnelRoses.length; i++) {
+          if (tunnelRoses[i].userData.z < minZ) minZ = tunnelRoses[i].userData.z;
+        }
+
+        for (let i = 0; i < tunnelRoses.length; i++) {
+          const rose = tunnelRoses[i];
+          const ud = rose.userData;
+
+          if (ud.z > 4) resetTunnelRose(rose, minZ);
+
+          const depth = -ud.z;
+          const spiral = ud.baseAngle + depth * 0.06 + parallaxX * 0.5;
+          const radius = ud.radius + Math.sin(depth * 0.15 + ud.spinAxis) * 0.15;
+
+          rose.position.set(
+            Math.cos(spiral) * radius + parallaxX * 0.3,
+            Math.sin(spiral) * radius + parallaxY * 0.3,
+            ud.z
+          );
+
+          rose.rotation.z += ud.rotSpeed * dt;
+          rose.rotation.y += dt * 0.3;
+
+          const t = Math.min(1, depth / 25);
+          const scale = 0.15 + t * t * 1.1;
+          rose.scale.setScalar(scale);
+        }
+      }
+
+      function updateStars(speed, dt) {
+        const pos = stars.geometry.attributes.position.array;
+        const t = performance.now() * 0.001;
+
+        for (let i = 0; i < starPhases.length; i++) {
+          pos[i * 3 + 2] += speed * 1.2;
+          if (pos[i * 3 + 2] > 2) {
+            pos[i * 3 + 2] = -80 - Math.random() * 30;
+          }
+          starPhases[i] += dt;
+        }
+
+        stars.geometry.attributes.position.needsUpdate = true;
+        stars.material.opacity = 0.7 + Math.sin(t * 0.5) * 0.1;
+        stars.rotation.z = parallaxX * 0.05;
+      }
+
+      /* ── touch-spawned flying roses ── */
+      function spawnFlyingRose(nx, ny) {
+        if (flyingRoses.length >= MAX_FLYING) {
+          const old = flyingRoses.shift();
+          scene.remove(old.mesh);
+        }
+
+        const color = pickColor();
+        const mesh = buildRose(color);
+
+        const spreadX = (nx - 0.5) * 12;
+        const spreadY = -(ny - 0.5) * 8;
+        mesh.position.set(spreadX, spreadY, -28 - Math.random() * 15);
+        mesh.scale.setScalar(0.01);
+
+        scene.add(mesh);
+
+        const entry = {
+          mesh,
+          vx: (Math.random() - 0.5) * 0.02,
+          vy: (Math.random() - 0.5) * 0.02,
+          vz: 0.35 + Math.random() * 0.25,
+          rotSpeed: (Math.random() - 0.5) * 1.5,
+          life: 0,
+        };
+
+        flyingRoses.push(entry);
+
+        gsap.to(mesh.scale, {
+          x: 1.2, y: 1.2, z: 1.2,
+          duration: 1.4,
+          ease: 'back.out(1.4)',
+        });
+      }
+
+      function updateFlyingRoses(dt, speed) {
+        for (let i = flyingRoses.length - 1; i >= 0; i--) {
+          const f = flyingRoses[i];
+          f.life += dt;
+          f.mesh.position.x += f.vx + parallaxX * 0.01;
+          f.mesh.position.y += f.vy + parallaxY * 0.01;
+          f.mesh.position.z += f.vz + speed;
+          f.mesh.rotation.z += f.rotSpeed * dt;
+          f.mesh.rotation.x += dt * 0.5;
+
+          const depth = -f.mesh.position.z;
+          const scale = 0.3 + Math.min(1, depth / 20) * 1.4;
+          f.mesh.scale.setScalar(scale * (1 + Math.sin(f.life * 3) * 0.05));
+
+          if (f.mesh.position.z > 6) {
+            scene.remove(f.mesh);
+            flyingRoses.splice(i, 1);
+          }
+        }
+      }
+
+      /* ── UI messages ── */
+      function hideInstruction() {
+        if (instructionHidden) return;
+        instructionHidden = true;
+        gsap.to(instructionEl, { opacity: 0, duration: 1.2, ease: 'power2.inOut' });
+      }
+
+      function showPoem() {
+        if (poemShown) return;
+        poemShown = true;
+        gsap.to(poemEl, { opacity: 1, duration: 2.5, ease: 'power2.out', delay: 0.3 });
+      }
+
+      /* ── input ── */
+      function onPointerDown(e) {
+        e.preventDefault();
+        touchActive = true;
+        const pt = getPoint(e);
+        lastTouchX = pt.x;
+        lastTouchY = pt.y;
+        hideInstruction();
+        spawnFlyingRose(pt.x / window.innerWidth, pt.y / window.innerHeight);
+      }
+
+      function onPointerMove(e) {
+        e.preventDefault();
+        if (!touchActive) return;
+        const pt = getPoint(e);
+        const dx = pt.x - lastTouchX;
+        const dy = pt.y - lastTouchY;
+
+        targetVelocity += -dy * 0.004;
+        parallaxX += dx * 0.003;
+        parallaxY += -dy * 0.002;
+
+        parallaxX *= 0.98;
+        parallaxY *= 0.98;
+
+        spawnCooldown += Math.abs(dx) + Math.abs(dy);
+        if (spawnCooldown > 40) {
+          spawnCooldown = 0;
+          spawnFlyingRose(pt.x / window.innerWidth, pt.y / window.innerHeight);
+        }
+
+        interactionTime += Math.abs(dx) + Math.abs(dy);
+        if (interactionTime > 800 && !poemShown) showPoem();
+
+        lastTouchX = pt.x;
+        lastTouchY = pt.y;
+      }
+
+      function onPointerUp() {
+        touchActive = false;
+      }
+
+      function getPoint(e) {
+        if (e.touches && e.touches.length) {
+          return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        }
+        return { x: e.clientX, y: e.clientY };
+      }
+
+      function bindInput() {
+        const el = renderer.domElement;
+        el.addEventListener('touchstart', onPointerDown, { passive: false });
+        el.addEventListener('touchmove', onPointerMove, { passive: false });
+        el.addEventListener('touchend', onPointerUp);
+        el.addEventListener('touchcancel', onPointerUp);
+        el.addEventListener('mousedown', onPointerDown);
+        el.addEventListener('mousemove', onPointerMove);
+        el.addEventListener('mouseup', onPointerUp);
+        el.addEventListener('mouseleave', onPointerUp);
+      }
+
+      function onResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, DPR_CAP));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      /* ── loop ── */
+      let lastTime = 0;
+
+      function animate(now) {
+        requestAnimationFrame(animate);
+        const dt = Math.min((now - lastTime) / 1000, 0.05);
+        lastTime = now;
+
+        velocity += (targetVelocity - velocity) * 0.08;
+        targetVelocity *= 0.96;
+        velocity *= 0.985;
+
+        const baseDrift = 0.06;
+        const speed = baseDrift + Math.max(0, velocity);
+
+        camera.rotation.x += (parallaxY * 0.08 - camera.rotation.x) * 0.06;
+        camera.rotation.y += (parallaxX * 0.08 - camera.rotation.y) * 0.06;
+
+        updateTunnel(dt, speed);
+        updateStars(speed, dt);
+        updateFlyingRoses(dt, speed);
+
+        if (touchActive) {
+          interactionTime += dt * 120;
+          if (interactionTime > 800 && !poemShown) showPoem();
+        }
+
+        renderer.render(scene, camera);
+      }
+
+      init();
+      bindInput();
+      window.addEventListener('resize', onResize);
+      gsap.from(instructionEl, { opacity: 0, duration: 2, ease: 'power2.out', delay: 0.5 });
+      requestAnimationFrame(t => { lastTime = t; animate(t); });
+    })();
+  </script>
+</body>
+</html>
