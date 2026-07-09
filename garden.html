@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Moonrise Garden</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0a0e1a;
+      touch-action: none;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    canvas { display: block; width: 100%; height: 100%; }
+
+    .ui {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    #title {
+      position: absolute;
+      top: 8%;
+      left: 0;
+      right: 0;
+      text-align: center;
+      font-family: Georgia, 'Times New Roman', serif;
+      font-style: italic;
+      font-size: clamp(1rem, 4.5vw, 1.35rem);
+      color: rgba(255, 255, 255, 0.55);
+      letter-spacing: 0.06em;
+      text-shadow: 0 0 40px rgba(195, 177, 225, 0.35);
+      transition: opacity 1.8s ease;
+    }
+
+    #hint {
+      position: absolute;
+      bottom: 7%;
+      left: 0;
+      right: 0;
+      text-align: center;
+      font-family: Georgia, 'Times New Roman', serif;
+      font-style: italic;
+      font-size: clamp(0.72rem, 3vw, 0.88rem);
+      color: rgba(255, 255, 255, 0.22);
+      letter-spacing: 0.04em;
+      transition: opacity 2s ease;
+    }
+
+    .fade-out { opacity: 0 !important; }
+  </style>
+</head>
+<body>
+  <canvas id="sky"></canvas>
+  <div class="ui">
+    <p id="title">Moonrise Garden</p>
+    <p id="hint">Touch the earth to plant light…</p>
+  </div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      const COLORS = ['#FFB7C5', '#C3B1E1', '#96DED1', '#FFD4E5', '#B8E8DF'];
+      const MAX_FLOWERS = 35;
+      const MAX_FIREFLIES = 90;
+      const MAX_SEEDS = 12;
+      const DPR_CAP = 2;
+
+      const canvas = document.getElementById('sky');
+      const ctx = canvas.getContext('2d', { alpha: false });
+      const titleEl = document.getElementById('title');
+      const hintEl = document.getElementById('hint');
+
+      let W, H, DPR;
+      let stars = [];
+      let fireflies = [];
+      let flowers = [];
+      let seeds = [];
+      let moonX, moonY, moonTargetX;
+      let touchX = -999, touchY = -999;
+      let touchActive = false;
+      let windPhase = 0;
+      let planted = 0;
+      let lastTime = 0;
+      let plantCooldown = 0;
+
+      const rand = (a, b) => a + Math.random() * (b - a);
+      const pick = arr => arr[(Math.random() * arr.length) | 0];
+      const lerp = (a, b, t) => a + (b - a) * t;
+      const hexA = (hex, a) => {
+        const n = parseInt(hex.slice(1), 16);
+        return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+      };
+
+      /* ── layout ── */
+      function hillY(x) {
+        const t = x / W;
+        return H * 0.68
+          + Math.sin(t * Math.PI) * H * 0.1
+          + Math.sin(t * 3.7 + 1.2) * 18
+          + Math.sin(t * 8.3) * 6;
+      }
+
+      function resize() {
+        DPR = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+        W = window.innerWidth;
+        H = window.innerHeight;
+        canvas.width = (W * DPR) | 0;
+        canvas.height = (H * DPR) | 0;
+        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+        moonX = W * 0.72;
+        moonY = H * 0.18;
+        moonTargetX = moonX;
+        initStars();
+        if (!fireflies.length) initFireflies();
+      }
+
+      function initStars() {
+        stars = [];
+        const n = Math.min(220, ((W * H) / 3500) | 0);
+        for (let i = 0; i < n; i++) {
+          stars.push({
+            x: Math.random() * W,
+            y: Math.random() * H * 0.55,
+            r: rand(0.4, 1.4),
+            tw: rand(0, Math.PI * 2),
+            speed: rand(1, 3),
+          });
+        }
+      }
+
+      function initFireflies() {
+        fireflies = [];
+        for (let i = 0; i < MAX_FIREFLIES; i++) {
+          fireflies.push(createFirefly(true));
+        }
+      }
+
+      function createFirefly(randomPos) {
+        return {
+          x: randomPos ? rand(0, W) : rand(touchX - 40, touchX + 40),
+          y: randomPos ? rand(H * 0.3, H * 0.85) : rand(touchY - 60, touchY - 10),
+          vx: rand(-0.3, 0.3),
+          vy: rand(-0.4, 0.2),
+          r: rand(1.2, 2.8),
+          phase: rand(0, Math.PI * 2),
+          color: pick(COLORS),
+          wander: rand(0, Math.PI * 2),
+        };
+      }
+
+      /* ── planting ── */
+      function plantSeed(x) {
+        const y = hillY(x);
+        if (y > H * 0.92) return;
+
+        seeds.push({
+          x, y,
+          t: 0,
+          color: pick(COLORS),
+        });
+
+        if (seeds.length > MAX_SEEDS) seeds.shift();
+
+        setTimeout(() => {
+          if (flowers.length >= MAX_FLOWERS) flowers.shift();
+          flowers.push(createFlower(x, y));
+          planted++;
+          if (planted === 1) {
+            hintEl.classList.add('fade-out');
+            setTimeout(() => titleEl.classList.add('fade-out'), 3000);
+          }
+        }, 500);
+      }
+
+      function createFlower(x, y) {
+        const color = pick(COLORS);
+        const stemH = rand(50, 110);
+        const petals = (rand(5, 8) | 0);
+        const petalData = [];
+        for (let i = 0; i < petals; i++) {
+          petalData.push({
+            angle: (i / petals) * Math.PI * 2 + rand(-0.2, 0.2),
+            len: rand(14, 24),
+            wid: rand(7, 12),
+          });
+        }
+        return {
+          x, y, color, stemH, petals: petalData,
+          growth: 0, growthVel: 0,
+          sway: rand(0, Math.PI * 2),
+          swaySpeed: rand(0.6, 1.2),
+          bloom: 0, bloomVel: 0,
+          glow: 0,
+        };
+      }
+
+      function spring(obj, prop, vel, target, stiff, damp, dt) {
+        const f = (target - obj[prop]) * stiff;
+        obj[vel] = (obj[vel] + f) * Math.pow(damp, dt * 60);
+        obj[prop] += obj[vel] * dt * 60;
+      }
+
+      /* ── drawing ── */
+      function drawSky() {
+        const grad = ctx.createLinearGradient(0, 0, 0, H);
+        grad.addColorStop(0, '#0c1028');
+        grad.addColorStop(0.35, '#121833');
+        grad.addColorStop(0.65, '#1a2344');
+        grad.addColorStop(1, '#0e1520');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+      }
+
+      function drawStars(t) {
+        for (let i = 0; i < stars.length; i++) {
+          const s = stars[i];
+          const a = 0.25 + Math.sin(t * s.speed + s.tw) * 0.2;
+          ctx.globalAlpha = a;
+          ctx.fillStyle = '#fff';
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawMoon() {
+        moonX = lerp(moonX, moonTargetX, 0.02);
+
+        const glow = ctx.createRadialGradient(moonX, moonY, 0, moonX, moonY, 120);
+        glow.addColorStop(0, 'rgba(255,248,235,0.18)');
+        glow.addColorStop(0.3, 'rgba(220,210,255,0.06)');
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(moonX, moonY, 120, 0, Math.PI * 2);
+        ctx.fill();
+
+        const moonGrad = ctx.createRadialGradient(moonX - 8, moonY - 8, 2, moonX, moonY, 32);
+        moonGrad.addColorStop(0, '#fff8ee');
+        moonGrad.addColorStop(0.7, '#e8e0f0');
+        moonGrad.addColorStop(1, '#c8c0d8');
+        ctx.fillStyle = moonGrad;
+        ctx.beginPath();
+        ctx.arc(moonX, moonY, 28, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = 0.12;
+        ctx.fillStyle = '#c3b1e1';
+        ctx.beginPath();
+        ctx.arc(moonX - 10, moonY + 5, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(moonX + 8, moonY - 8, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHill() {
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        for (let x = 0; x <= W; x += 4) {
+          ctx.lineTo(x, hillY(x));
+        }
+        ctx.lineTo(W, H);
+        ctx.closePath();
+
+        const hillGrad = ctx.createLinearGradient(0, H * 0.55, 0, H);
+        hillGrad.addColorStop(0, '#1a2838');
+        hillGrad.addColorStop(0.5, '#111c28');
+        hillGrad.addColorStop(1, '#080f18');
+        ctx.fillStyle = hillGrad;
+        ctx.fill();
+
+        ctx.strokeStyle = 'rgba(150,222,209,0.06)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      function drawSeed(s, t) {
+        s.t += 0.02;
+        const pulse = 0.5 + Math.sin(s.t * 6) * 0.3;
+        const r = 3 * pulse;
+
+        const g = ctx.createRadialGradient(s.x, s.y - 2, 0, s.x, s.y - 2, r * 4);
+        g.addColorStop(0, s.color);
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.globalAlpha = 0.7;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y - 2, r * 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = s.color;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y - 2, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawFlower(f, t) {
+        spring(f, 'growth', 'growthVel', 1, 0.1, 0.75, 0.016);
+        if (f.growth > 0.6) spring(f, 'bloom', 'bloomVel', 1, 0.14, 0.7, 0.016);
+        f.glow = 0.3 + f.bloom * 0.5;
+
+        const sway = Math.sin(t * f.swaySpeed + f.sway + windPhase * 0.4) * 8 * f.growth;
+        const topX = f.x + sway;
+        const topY = f.y - f.stemH * f.growth;
+
+        ctx.strokeStyle = `rgba(80,120,90,${0.5 + f.growth * 0.4})`;
+        ctx.lineWidth = 1.5 + f.growth;
+        ctx.beginPath();
+        ctx.moveTo(f.x, f.y);
+        ctx.quadraticCurveTo(f.x + sway * 0.5, f.y - f.stemH * f.growth * 0.5, topX, topY);
+        ctx.stroke();
+
+        if (f.bloom < 0.05) return;
+
+        const glowR = 30 * f.bloom;
+        const grd = ctx.createRadialGradient(topX, topY, 0, topX, topY, glowR);
+        grd.addColorStop(0, hexA(f.color, 0.35 * f.glow));
+        grd.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grd;
+        ctx.beginPath();
+        ctx.arc(topX, topY, glowR, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = f.color;
+        for (let i = 0; i < f.petals.length; i++) {
+          const p = f.petals[i];
+          const a = p.angle + t * 0.15;
+          const len = p.len * f.bloom;
+          const wid = p.wid * f.bloom;
+          const cos = Math.cos(a), sin = Math.sin(a);
+
+          ctx.globalAlpha = 0.75 * f.bloom;
+          ctx.beginPath();
+          ctx.moveTo(topX, topY);
+          ctx.bezierCurveTo(
+            topX + cos * len * 0.3 - sin * wid, topY + sin * len * 0.3 + cos * wid,
+            topX + cos * len * 0.8, topY + sin * len * 0.8,
+            topX + cos * len, topY + sin * len
+          );
+          ctx.bezierCurveTo(
+            topX + cos * len * 0.8 + sin * wid * 0.3, topY + sin * len * 0.8 - cos * wid * 0.3,
+            topX + sin * wid * 0.15, topY - cos * wid * 0.15,
+            topX, topY
+          );
+          ctx.fill();
+        }
+
+        ctx.globalAlpha = 0.9 * f.bloom;
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.beginPath();
+        ctx.arc(topX, topY, 3 * f.bloom, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      function drawFirefly(ff, t, dt) {
+        ff.phase += dt * 3;
+        ff.wander += dt * 0.8;
+
+        const glow = 0.35 + Math.sin(ff.phase) * 0.35;
+        ff.vx += Math.sin(ff.wander) * 0.02;
+        ff.vy += Math.cos(ff.wander * 1.3) * 0.015;
+        ff.vx *= 0.98;
+        ff.vy *= 0.98;
+
+        if (touchActive) {
+          const dx = touchX - ff.x;
+          const dy = touchY - ff.y;
+          const d = Math.sqrt(dx * dx + dy * dy) || 1;
+          if (d < 160) {
+            const force = (1 - d / 160) * 0.15;
+            ff.vx += (dx / d) * force;
+            ff.vy += (dy / d) * force;
+          }
+        }
+
+        for (let i = 0; i < flowers.length; i++) {
+          const fl = flowers[i];
+          if (fl.bloom < 0.5) continue;
+          const fx = fl.x + Math.sin(t * fl.swaySpeed + fl.sway) * 8;
+          const fy = fl.y - fl.stemH;
+          const dx = fx - ff.x;
+          const dy = fy - ff.y;
+          const d = Math.sqrt(dx * dx + dy * dy) || 1;
+          if (d < 80) {
+            ff.vx += (dx / d) * 0.008;
+            ff.vy += (dy / d) * 0.008;
+          }
+        }
+
+        ff.x += ff.vx;
+        ff.y += ff.vy;
+
+        if (ff.x < -10) ff.x = W + 10;
+        if (ff.x > W + 10) ff.x = -10;
+        if (ff.y < H * 0.15) ff.vy += 0.05;
+        if (ff.y > H * 0.95) ff.vy -= 0.05;
+
+        const grd = ctx.createRadialGradient(ff.x, ff.y, 0, ff.x, ff.y, ff.r * 5);
+        grd.addColorStop(0, ff.color);
+        grd.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.globalAlpha = glow * 0.5;
+        ctx.fillStyle = grd;
+        ctx.beginPath();
+        ctx.arc(ff.x, ff.y, ff.r * 5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = glow;
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(ff.x, ff.y, ff.r * 0.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      function drawTouchGlow() {
+        if (!touchActive) return;
+        const g = ctx.createRadialGradient(touchX, touchY, 0, touchX, touchY, 80);
+        g.addColorStop(0, 'rgba(195,177,225,0.12)');
+        g.addColorStop(0.5, 'rgba(150,222,209,0.05)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(touchX, touchY, 80, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      /* ── input ── */
+      function onDown(e) {
+        e.preventDefault();
+        const p = getPoint(e);
+        touchActive = true;
+        touchX = p.x;
+        touchY = p.y;
+        moonTargetX = lerp(W * 0.55, W * 0.82, p.x / W);
+        plantSeed(p.x);
+      }
+
+      function onMove(e) {
+        e.preventDefault();
+        const p = getPoint(e);
+        touchX = p.x;
+        touchY = p.y;
+        moonTargetX = lerp(W * 0.55, W * 0.82, p.x / W);
+        if (touchActive) {
+          plantCooldown += 1;
+          if (plantCooldown > 8) {
+            plantCooldown = 0;
+            plantSeed(p.x);
+          }
+        }
+      }
+
+      function onUp() { touchActive = false; }
+
+      function getPoint(e) {
+        if (e.touches && e.touches.length) {
+          return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        }
+        return { x: e.clientX, y: e.clientY };
+      }
+
+      canvas.addEventListener('touchstart', onDown, { passive: false });
+      canvas.addEventListener('touchmove', onMove, { passive: false });
+      canvas.addEventListener('touchend', onUp);
+      canvas.addEventListener('touchcancel', onUp);
+      canvas.addEventListener('mousedown', onDown);
+      canvas.addEventListener('mousemove', e => { if (touchActive) onMove(e); });
+      canvas.addEventListener('mouseup', onUp);
+
+      /* ── loop ── */
+      function tick(now) {
+        const dt = Math.min((now - lastTime) / 1000, 0.05);
+        lastTime = now;
+        const t = now * 0.001;
+        windPhase += dt;
+
+        drawSky();
+        drawStars(t);
+        drawMoon();
+        drawHill();
+
+        for (let i = 0; i < seeds.length; i++) drawSeed(seeds[i], t);
+
+        for (let i = 0; i < flowers.length; i++) drawFlower(flowers[i], t);
+
+        for (let i = 0; i < fireflies.length; i++) drawFirefly(fireflies[i], t, dt);
+
+        drawTouchGlow();
+
+        requestAnimationFrame(tick);
+      }
+
+      window.addEventListener('resize', resize);
+      resize();
+      requestAnimationFrame(t => { lastTime = t; tick(t); });
+    })();
+  </script>
+</body>
+</html>
